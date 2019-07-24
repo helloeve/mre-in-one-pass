@@ -169,11 +169,27 @@ class FullTokenizer(object):
 
   def tokenize(self, text):
     split_tokens = []
-    for token in self.basic_tokenizer.tokenize(text):
+    # for [CLS]
+    mapping = [0]
+    # alignment
+    original = text.lower().split()
+    pointer = 0
+    buff = ""
+    for idx, token in enumerate(self.basic_tokenizer.tokenize(text)):
       for sub_token in self.wordpiece_tokenizer.tokenize(token):
         split_tokens.append(sub_token)
-
-    return split_tokens
+        mapping.append(pointer + 1)
+      if token == original[pointer] or buff + token == original[pointer]:
+        pointer = pointer + 1
+        buff = ""
+      else:
+        buff = buff + token
+    # cut-off
+    if len(mapping) >= tf.flags.FLAGS.max_seq_length - 1:
+      mapping = mapping[:tf.flags.FLAGS.max_seq_length - 1]
+    # for [SEP]
+    mapping.append(mapping[-1] + 1)
+    return split_tokens, mapping
 
   def convert_tokens_to_ids(self, tokens):
     return convert_by_vocab(self.vocab, tokens)

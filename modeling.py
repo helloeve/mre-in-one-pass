@@ -135,7 +135,8 @@ class BertModel(object):
                input_mask=None,
                token_type_ids=None,
                use_one_hot_embeddings=False,
-               scope=None):
+               scope=None,
+               extras=None):
     """Constructor for BertModel.
 
     Args:
@@ -213,7 +214,8 @@ class BertModel(object):
             hidden_dropout_prob=config.hidden_dropout_prob,
             attention_probs_dropout_prob=config.attention_probs_dropout_prob,
             initializer_range=config.initializer_range,
-            do_return_all_layers=True)
+            do_return_all_layers=True,
+            extras=extras)
 
       self.sequence_output = self.all_encoder_layers[-1]
       # The "pooler" converts the encoded sequence tensor of shape
@@ -568,7 +570,8 @@ def attention_layer(from_tensor,
                     do_return_2d_tensor=False,
                     batch_size=None,
                     from_seq_length=None,
-                    to_seq_length=None):
+                    to_seq_length=None,
+                    extras=None):
   """Performs multi-headed attention from `from_tensor` to `to_tensor`.
 
   This is an implementation of multi-headed attention based on "Attention
@@ -652,6 +655,20 @@ def attention_layer(from_tensor,
           "for `batch_size`, `from_seq_length`, and `to_seq_length` "
           "must all be specified.")
 
+  width = to_tensor.shape[-1]
+  depth = extras.max_distance * 2 + 1
+
+  flat_entity_loc = tf.reshape(extras.loc, [-1])
+  flat_entity_mas = tf.expand_dims(tf.reshape(extras.mas, [-1]), axis=-1)
+  one_hot_ids = tf.one_hot(flat_entity_loc, depth=depth)
+  entity_embeddings_key = tf.matmul(one_hot_ids, extras.entity_pos_table_key)
+  entity_embeddings_key = tf.multiply(entity_embeddings_key, tf.to_float(flat_entity_mas))
+  entity_embeddings_key = tf.reshape(entity_embeddings_key, [batch_size, from_seq_length, to_seq_length, width])
+
+  entity_embeddings_val = tf.matmul(one_hot_ids, extras.entity_pos_table_val)
+  entity_embeddings_val = tf.multiply(entity_embeddings_val, tf.to_float(flat_entity_mas))
+  entity_embeddings_val = tf.reshape(entity_embeddings_val, [batch_size, from_seq_length, to_seq_length, width])
+
   # Scalar dimensions referenced here:
   #   B = batch size (number of sequences)
   #   F = `from_tensor` sequence length
@@ -669,6 +686,8 @@ def attention_layer(from_tensor,
       activation=query_act,
       name="query",
       kernel_initializer=create_initializer(initializer_range))
+  query_layer = transpose_for_scores(query_layer, batch_size, num_attention_heads, from_seq_length, size_per_head)
+  query_layer = tf.expand_dims(query_layer, axis=-2)
 
   # `key_layer` = [B*T, N*H]
   key_layer = tf.layers.dense(
@@ -677,6 +696,10 @@ def attention_layer(from_tensor,
       activation=key_act,
       name="key",
       kernel_initializer=create_initializer(initializer_range))
+  key_layer = tf.reshape(key_layer, [batch_size, 1, to_seq_length, width])
+  key_layer = key_layer + entity_embeddings_key
+  key_layer = tf.reshape(key_layer, [batch_size, from_seq_length, to_seq_length, num_attention_heads, size_per_head])
+  key_layer = tf.transpose(key_layer, [0, 3, 1, 2, 4])
 
   # `value_layer` = [B*T, N*H]
   value_layer = tf.layers.dense(
@@ -685,20 +708,16 @@ def attention_layer(from_tensor,
       activation=value_act,
       name="value",
       kernel_initializer=create_initializer(initializer_range))
-
-  # `query_layer` = [B, N, F, H]
-  query_layer = transpose_for_scores(query_layer, batch_size,
-                                     num_attention_heads, from_seq_length,
-                                     size_per_head)
-
-  # `key_layer` = [B, N, T, H]
-  key_layer = transpose_for_scores(key_layer, batch_size, num_attention_heads,
-                                   to_seq_length, size_per_head)
+  value_layer = tf.reshape(value_layer, [batch_size, 1, to_seq_length, width])
+  value_layer = value_layer + entity_embeddings_val
+  value_layer = tf.reshape(value_layer, [batch_size, from_seq_length, to_seq_length, num_attention_heads, size_per_head])
+  value_layer = tf.transpose(value_layer, [0, 3, 1, 2, 4])
 
   # Take the dot product between "query" and "key" to get the raw
   # attention scores.
   # `attention_scores` = [B, N, F, T]
   attention_scores = tf.matmul(query_layer, key_layer, transpose_b=True)
+  attention_scores = tf.squeeze(attention_scores, axis=-2)
   attention_scores = tf.multiply(attention_scores,
                                  1.0 / math.sqrt(float(size_per_head)))
 
@@ -722,17 +741,11 @@ def attention_layer(from_tensor,
   # This is actually dropping out entire tokens to attend to, which might
   # seem a bit unusual, but is taken from the original Transformer paper.
   attention_probs = dropout(attention_probs, attention_probs_dropout_prob)
-
-  # `value_layer` = [B, T, N, H]
-  value_layer = tf.reshape(
-      value_layer,
-      [batch_size, to_seq_length, num_attention_heads, size_per_head])
-
-  # `value_layer` = [B, N, T, H]
-  value_layer = tf.transpose(value_layer, [0, 2, 1, 3])
+  attention_probs = tf.expand_dims(attention_probs, axis=-2)
 
   # `context_layer` = [B, N, F, H]
   context_layer = tf.matmul(attention_probs, value_layer)
+  context_layer = tf.squeeze(context_layer, axis=-2)
 
   # `context_layer` = [B, F, N, H]
   context_layer = tf.transpose(context_layer, [0, 2, 1, 3])
@@ -761,7 +774,8 @@ def transformer_model(input_tensor,
                       hidden_dropout_prob=0.1,
                       attention_probs_dropout_prob=0.1,
                       initializer_range=0.02,
-                      do_return_all_layers=False):
+                      do_return_all_layers=False,
+                      extras=None):
   """Multi-headed, multi-layer Transformer from "Attention is All You Need".
 
   This is almost an exact implementation of the original Transformer encoder.
@@ -816,6 +830,16 @@ def transformer_model(input_tensor,
     raise ValueError("The width of the input tensor (%d) != hidden size (%d)" %
                      (input_width, hidden_size))
 
+  extras.entity_pos_table_key = tf.get_variable(
+        name='entity_pos_embeddings_key',
+        shape=[extras.max_distance * 2 + 1, hidden_size],
+        initializer=create_initializer(0.5))
+
+  extras.entity_pos_table_val = tf.get_variable(
+        name='entity_pos_embeddings_val',
+        shape=[extras.max_distance * 2 + 1, hidden_size],
+        initializer=create_initializer(0.5))
+
   # We keep the representation as a 2D tensor to avoid re-shaping it back and
   # forth from a 3D tensor to a 2D tensor. Re-shapes are normally free on
   # the GPU/CPU but may not be free on the TPU, so we want to minimize them to
@@ -841,7 +865,8 @@ def transformer_model(input_tensor,
               do_return_2d_tensor=True,
               batch_size=batch_size,
               from_seq_length=seq_length,
-              to_seq_length=seq_length)
+              to_seq_length=seq_length,
+              extras=extras)
           attention_heads.append(attention_head)
 
         attention_output = None
