@@ -38,7 +38,7 @@ python run_classifier.py \
         --output_dir=<path to store the checkpoint>
 ```
 
-## Prediting
+## Predicting (MRE)
 The following command will work for using the trained model to inference on the test dataset.
 ```
 python run_classifier.py \
@@ -78,7 +78,7 @@ python run_classifier.py \
         --output_dir=<path to store the checkpoint>
 ```
 
-## Prediting
+## Predicting (SRE)
 The following command will work for using the trained model to inference on the test dataset.
 ```
 python run_classifier.py \
